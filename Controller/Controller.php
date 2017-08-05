@@ -107,76 +107,87 @@ class Controller
     public function getTranslationsAction(Request $request, $domain, $_format)
     {
         $locales = $this->getLocales($request);
-
         if (0 === count($locales)) {
             throw new NotFoundHttpException();
         }
 
-        $cache = new ConfigCache(sprintf('%s/%s.%s.%s',
-            $this->cacheDir,
-            $domain,
-            implode('-', $locales),
-            $_format
-        ), $this->debug);
+        return $this->doGetTranslations($request, $locales, [$domain], $_format);
+    }
+
+    public function getMergedTranslationsAction(Request $request, $_format)
+    {
+        $locales = $this->getLocales($request);
+        if (0 === count($locales)) {
+            throw new NotFoundHttpException();
+        }
+
+        $domains = $this->getDomains($request);
+        if (0 === count($domains)) {
+            throw new NotFoundHttpException();
+        }
+
+        return $this->doGetTranslations($request, $locales, $domains, $_format);
+    }
+
+    private function doGetTranslations(Request $request, array $locales, $domains, $_format)
+    {
+        $cache = new ConfigCache($this->generateCachePatch($locales, $domains, $_format), $this->debug);
 
         if (!$cache->isFresh()) {
-            $resources    = array();
-            $translations = array();
-
+            $resources = [];
+            $translations = [];
             foreach ($locales as $locale) {
-                $translations[$locale] = array();
+                $translations[$locale] = [];
+                foreach ($domains as $domain) {
+                    $files = $this->translationFinder->get($domain, $locale);
 
-                $files = $this->translationFinder->get($domain, $locale);
+                    if (1 > count($files)) {
+                        continue;
+                    }
 
-                if (1 > count($files)) {
-                    continue;
-                }
+                    $translations[$locale][$domain] = [];
 
-                $translations[$locale][$domain] = array();
+                    foreach ($files as $filename) {
+                        $extension = pathinfo($filename, \PATHINFO_EXTENSION);
 
-                foreach ($files as $filename) {
-                    $extension = pathinfo($filename, \PATHINFO_EXTENSION);
+                        if (isset($this->loaders[$extension])) {
+                            $resources[] = new FileResource($filename);
+                            $catalogue = $this->loaders[$extension]
+                                ->load($filename, $locale, $domain);
 
-                    if (isset($this->loaders[$extension])) {
-                        $resources[] = new FileResource($filename);
-                        $catalogue   = $this->loaders[$extension]
-                            ->load($filename, $locale, $domain);
-
-                        $translations[$locale][$domain] = array_replace_recursive(
-                            $translations[$locale][$domain],
-                            $catalogue->all($domain)
-                        );
+                            $translations[$locale][$domain] = array_replace_recursive(
+                                $translations[$locale][$domain],
+                                $catalogue->all($domain)
+                            );
+                        }
                     }
                 }
             }
 
             $content = $this->engine->render('BazingaJsTranslationBundle::getTranslations.' . $_format . '.twig', array(
-                'fallback'       => $this->localeFallback,
-                'defaultDomain'  => $this->defaultDomain,
-                'translations'   => $translations,
+                'fallback' => $this->localeFallback,
+                'defaultDomain' => $this->defaultDomain,
+                'translations' => $translations,
                 'include_config' => true,
             ));
 
             try {
                 $cache->write($content, $resources);
             } catch (IOException $e) {
-                throw new NotFoundHttpException();
             }
         }
 
         if (method_exists($cache, 'getPath')) {
             $cachePath = $cache->getPath();
         } else {
-            $cachePath = (string) $cache;
+            $cachePath = (string)$cache;
         }
 
         $expirationTime = new \DateTime();
         $expirationTime->modify('+' . $this->httpCacheTime . ' seconds');
-        $response = new Response(
-            file_get_contents($cachePath),
-            200,
-            array('Content-Type' => $request->getMimeType($_format))
-        );
+        $response = new Response(file_get_contents($cachePath), 200, [
+            'Content-Type' => $request->getMimeType($_format)
+        ]);
         $response->prepare($request);
         $response->setPublic();
         $response->setETag(md5($response->getContent()));
@@ -184,6 +195,37 @@ class Controller
         $response->setExpires($expirationTime);
 
         return $response;
+    }
+
+    private function generateCachePatch(array $locales, array $domains, $format)
+    {
+        if (1 === count($domains)) {
+            $name = $domains[0];
+        }
+        else {
+            $name = md5(implode('-', $domains));
+        }
+
+        return sprintf('%s/%s.%s.%s',
+            $this->cacheDir,
+            $name,
+            implode('-', $locales),
+            $format
+        );
+    }
+
+    private function getDomains(Request $request)
+    {
+        $domains = $request->get('domains', []);
+        if ($domains !== null) {
+            $domains = explode(',', $domains);
+        }
+
+        $domains = array_unique(array_map(function ($domain) {
+            return trim($domain);
+        }, $domains));
+
+        return $domains;
     }
 
     private function getLocales(Request $request)
